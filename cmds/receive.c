@@ -1329,6 +1329,31 @@ out:
 	return ret;
 }
 
+static int process_setflags(const char *path, int flags, void *user)
+{
+	int ret = 0;
+	struct btrfs_receive *rctx = user;
+	char full_path[PATH_MAX];
+	long ioc_flags = flags;
+
+	ret = path_cat_out(full_path, rctx->full_subvol_path, path);
+	if (ret < 0) {
+		error("setflags: path invalid: %s", path);
+		goto out;
+	}
+	ret = open_inode_for_write(rctx, full_path, 0);
+	if (ret < 0)
+		goto out;
+	ret = ioctl(rctx->write_fd, FS_IOC_SETFLAGS, &ioc_flags);
+	if (ret < 0) {
+		ret = -errno;
+		error("setflags: setflags ioctl on %s failed: %m", path);
+		goto out;
+	}
+out:
+	return ret;
+}
+
 static struct btrfs_send_ops send_ops = {
 	.subvol = process_subvol,
 	.snapshot = process_snapshot,
@@ -1353,6 +1378,7 @@ static struct btrfs_send_ops send_ops = {
 	.update_extent = process_update_extent,
 	.encoded_write = process_encoded_write,
 	.fallocate = process_fallocate,
+	.setflags = process_setflags,
 };
 
 static int do_receive(struct btrfs_receive *rctx, const char *tomnt,
