@@ -52,6 +52,8 @@
 #include "common/help.h"
 #include "common/path-utils.h"
 
+#include "fsverity.h"
+
 struct btrfs_receive
 {
 	int mnt_fd;
@@ -986,6 +988,42 @@ static int process_update_extent(const char *path, u64 offset, u64 len,
 	return 0;
 }
 
+static int process_enable_verity(const char *path, u8 algorithm, u32 block_size,
+				 int salt_len, char *salt,
+				 int sig_len, char *sig, void *user)
+{
+	int ret;
+	struct btrfs_receive *rctx = user;
+	char full_path[PATH_MAX];
+	struct fsverity_enable_arg verity_args = {
+		.version = 1,
+		.hash_algorithm = 1,
+		.block_size = 4096,
+	};
+	int ioctl_fd;
+
+	ret = path_cat_out(full_path, rctx->full_subvol_path, path);
+	if (ret < 0) {
+		error("write: path invalid: %s", path);
+		goto out;
+	}
+
+	ioctl_fd = open(full_path, O_RDONLY);
+	if (ioctl_fd < 0) {
+		ret = -errno;
+		error("cannot open %s for verity ioctl: %m", full_path);
+		goto out;
+	}
+
+	ret = ioctl(ioctl_fd, FS_IOC_ENABLE_VERITY, &verity_args);
+	if (ret < 0)
+		fprintf(stderr, "Failed to enable verity on %s: %d\n", full_path, ret);
+
+	close(ioctl_fd);
+out:
+	return ret;
+}
+
 static struct btrfs_send_ops send_ops = {
 	.subvol = process_subvol,
 	.snapshot = process_snapshot,
@@ -1008,6 +1046,7 @@ static struct btrfs_send_ops send_ops = {
 	.chown = process_chown,
 	.utimes = process_utimes,
 	.update_extent = process_update_extent,
+	.enable_verity = process_enable_verity,
 };
 
 static int do_receive(struct btrfs_receive *rctx, const char *tomnt,

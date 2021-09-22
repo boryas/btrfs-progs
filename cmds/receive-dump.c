@@ -318,6 +318,16 @@ static int print_update_extent(const char *path, u64 offset, u64 len,
 			  offset, len);
 }
 
+static int print_enable_verity (const char *path, u8 algorithm, u32 block_size,
+				int salt_len, char *salt,
+				int sig_len, char *sig, void *user)
+{
+	return PRINT_DUMP(user, path, "enable_verity",
+			  "algorithm=%u block_size=%u salt_len=%d sig_len=%d",
+			  algorithm, block_size, salt_len, sig_len);
+}
+
+
 struct btrfs_send_ops btrfs_print_send_ops = {
 	.subvol = print_subvol,
 	.snapshot = print_snapshot,
@@ -339,5 +349,6 @@ struct btrfs_send_ops btrfs_print_send_ops = {
 	.chmod = print_chmod,
 	.chown = print_chown,
 	.utimes = print_utimes,
-	.update_extent = print_update_extent
+	.update_extent = print_update_extent,
+	.enable_verity = print_enable_verity,
 };
