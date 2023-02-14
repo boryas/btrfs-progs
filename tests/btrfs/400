@@ -1,0 +1,380 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2023 Meta Platforms, Inc.  All Rights Reserved.
+#
+# FS QA Test 400
+#
+# Test common btrfs simple quotas scenarios involving sharing extents and
+# removing them in various orders.
+#
+. ./common/preamble
+_begin_fstest auto quick qgroup copy_range snapshot
+
+# Import common functions.
+# . ./common/filter
+
+# real QA test starts here
+
+# Modify as appropriate.
+_supported_fs btrfs
+_require_scratch
+#_require_btrfs_qgroup_report
+
+SUBV=$SCRATCH_MNT/subv
+NESTED=$SCRATCH_MNT/subv/nested
+SNAP=$SCRATCH_MNT/snap
+K=1024
+M=$(($K * $K))
+NR_FILL=256
+FILL_SZ=$((8 * $K))
+TOTAL_FILL=$(($NR_FILL * $FILL_SZ))
+EB_SZ=$((16 * $K))
+EXT_SZ=$((128 * M))
+LIMIT=$(($EXT_SZ * 8))
+
+get_qgroup_usage()
+{
+	local qgroupid=$1
+
+	$BTRFS_UTIL_PROG qgroup show --sync --raw $SCRATCH_MNT | grep "$qgroupid" | $AWK_PROG '{print $3}'
+}
+
+get_subvol_usage()
+{
+	local subvolid=$1
+	get_qgroup_usage "0/$subvolid"
+}
+
+count_subvol_owned_metadata()
+{
+	local subvolid=$1
+	# find nodes and leaves owned by the subvol, then get unique offsets
+	# to account for snapshots sharing metadata.
+	count=$($BTRFS_UTIL_PROG inspect-internal dump-tree $SCRATCH_DEV | \
+		grep "owner $subvolid" | awk '{print $2}' | sort | uniq | wc -l)
+	# output bytes rather than number of metadata blocks
+	echo $(($count * $EB_SZ))
+}
+
+check_qgroup_usage()
+{
+	local qgroupid=$1
+	local expected=$2
+	local actual=$(get_qgroup_usage $qgroupid)
+
+	[ $expected -eq $actual ] || _fail "qgroup $qgroupid mismatched usage $actual vs $expected"
+}
+
+check_subvol_usage()
+{
+	local subvolid=$1
+	local expected_data=$2
+	# TODO: a bit wasteful to sync here
+	sync
+
+	local expected_meta=$(count_subvol_owned_metadata $subvolid)
+	local actual=$(get_subvol_usage $subvolid)
+	local expected=$(($expected_data + $expected_meta))
+
+	[ $expected -eq $actual ] || _fail "subvol $subvolid mismatched usage $actual vs $expected (expected data $expected_data expected meta $expected_meta diff $(($actual - $expected)))"
+	echo "OK $subvolid $expected_data $expected_meta $actual" >> $seqres.full
+}
+
+set_subvol_limit()
+{
+	local subvolid=$1
+	local limit=$2
+
+	$BTRFS_UTIL_PROG qgroup limit $2 0/$1 $SCRATCH_MNT
+}
+
+sync_check_subvol_usage()
+{
+	sync
+	check_subvol_usage $@
+}
+
+trigger_cleaner()
+{
+	echo "trigger cleaner" > /dev/kmsg
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	sleep 5
+	$BTRFS_UTIL_PROG filesystem sync $SCRATCH_MNT
+	echo "cleaner triggered" > /dev/kmsg
+}
+
+cycle_mount_check_subvol_usage()
+{
+	echo "cycle mounting" > /dev/kmsg
+	_scratch_cycle_mount
+	check_subvol_usage $@
+	echo "cycle mount done" > /dev/kmsg
+}
+
+
+do_write()
+{
+	local file=$1
+	local sz=$2
+
+	echo "write" > /dev/kmsg
+	$XFS_IO_PROG -fc "pwrite -q 0 $sz" $file
+	local ret=$?
+	echo "write done" > /dev/kmsg
+	return $ret
+}
+
+do_enospc_write()
+{
+	do_write $1 $2 2>/dev/null && _fail "expected enospc"
+}
+
+enable_quota()
+{
+	local mode=$1
+
+	[ $mode == "n" ] && return
+	arg=$([ $mode == "s" ] && echo "--simple")
+
+	$BTRFS_UTIL_PROG quota enable $arg $SCRATCH_MNT
+}
+
+prepare()
+{
+	echo "preparing" > /dev/kmsg
+	_scratch_mkfs >> $seqres.full
+	_scratch_mount
+	enable_quota "s"
+	$BTRFS_UTIL_PROG subvolume create $SUBV >> $seqres.full
+	set_subvol_limit 256 $LIMIT
+	check_subvol_usage 256 0
+
+	echo "filling" > /dev/kmsg
+	# Create a bunch of little filler files to generate several levels in
+	# the btree, to make snapshotting sharing scenarios complex enough.
+	#
+	# TODO: what's a good number here?
+	# 	why is it slow?!
+	for i in $(seq $NR_FILL)
+	do
+		fallocate -l $FILL_SZ $SUBV/fill.$i
+	done
+	echo "filled" > /dev/kmsg
+	check_subvol_usage 256 $TOTAL_FILL
+
+	# Create a single file whose extents we will explicitly share/unshare.
+	do_write $SUBV/f $EXT_SZ
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	echo "prepared" > /dev/kmsg
+}
+
+prepare_snapshotted()
+{
+	echo "prepare snapshotted" > /dev/kmsg
+	prepare
+	$BTRFS_UTIL_PROG subvolume snapshot $SUBV $SNAP >> $seqres.full
+	echo "snapshot" >> $seqres.full
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	echo "prepared snapshotted" > /dev/kmsg
+}
+
+prepare_nested()
+{
+	echo "prepare nested" > /dev/kmsg
+	prepare
+	$BTRFS_UTIL_PROG qgroup create 1/100 $SCRATCH_MNT
+	$BTRFS_UTIL_PROG qgroup assign 0/256 1/100 $SCRATCH_MNT >> $seqres.full
+	$BTRFS_UTIL_PROG subvolume create $NESTED >> $seqres.full
+	do_write $NESTED/f $EXT_SZ
+	check_subvol_usage 257 $EXT_SZ
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	local subv_usage=$(get_subvol_usage 256)
+	local nested_usage=$(get_subvol_usage 257)
+	check_qgroup_usage 1/100 $(($subv_usage + $nested_usage))
+	echo "prepared nested" > /dev/kmsg
+}
+
+basic_accounting()
+{
+	echo "basic" > /dev/kmsg
+	prepare
+	echo "basic" >> $seqres.full
+	echo "delete file" >> $seqres.full
+	rm $SUBV/f
+	check_subvol_usage 256 $TOTAL_FILL
+	cycle_mount_check_subvol_usage 256 $TOTAL_FILL
+	do_write $SUBV/tmp 512M
+	rm $SUBV/tmp
+	do_write $SUBV/tmp 512M
+	rm $SUBV/tmp
+	do_enospc_write $SUBV/large 2G
+	_scratch_unmount
+}
+
+reservation_accounting()
+{
+	echo "rsv" > /dev/kmsg
+	prepare
+	for i in $(seq 10); do
+		do_write $SUBV/tmp 512M
+		rm $SUBV/tmp
+	done
+	do_enospc_write $SUBV/large 2G
+	_scratch_unmount
+}
+
+snapshot_accounting()
+{
+	echo "snap" > /dev/kmsg
+	prepare_snapshotted
+	echo "unshare snapshot metadata" >> $seqres.full
+	touch $SNAP/f
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	echo "unshare snapshot data" >> $seqres.full
+	do_write $SNAP/f $EXT_SZ
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 $EXT_SZ
+	echo "delete snapshot file" >> $seqres.full
+	rm $SNAP/f
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	echo "delete original file" >> $seqres.full
+	rm $SUBV/f
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	cycle_mount_check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	_scratch_unmount
+}
+
+delete_subvol_file()
+{
+	echo "del sv ref" > /dev/kmsg
+	prepare_snapshotted
+	echo "delete subvol file first" >> $seqres.full
+	rm $SUBV/f
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	rm $SNAP/f
+	trigger_cleaner
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	cycle_mount_check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	_scratch_unmount
+}
+
+delete_snapshot_file()
+{
+	echo "del snap ref" > /dev/kmsg
+	prepare_snapshotted
+	echo "delete snapshot file first" >> $seqres.full
+	rm $SNAP/f
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	rm $SUBV/f
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	cycle_mount_check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	_scratch_unmount
+}
+
+delete_subvol()
+{
+	echo "del sv" > /dev/ksmg
+	prepare_snapshotted
+	echo "delete subvol first" >> $seqres.full
+	$BTRFS_UTIL_PROG subvolume delete $SUBV >> $seqres.full
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	rm $SNAP/f
+	trigger_cleaner
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	$BTRFS_UTIL_PROG subvolume delete $SNAP >> $seqres.full
+	trigger_cleaner
+	check_subvol_usage 256 0
+	check_subvol_usage 257 0
+	cycle_mount_check_subvol_usage 256 0
+	check_subvol_usage 257 0
+	_scratch_unmount
+}
+
+delete_snapshot()
+{
+	echo "del snap" > /dev/ksmg
+	prepare_snapshotted
+	echo "delete snapshot first" >> $seqres.full
+	$BTRFS_UTIL_PROG subvolume delete $SNAP >> $seqres.full
+	check_subvol_usage 256 $(($TOTAL_FILL + $EXT_SZ))
+	check_subvol_usage 257 0
+	$BTRFS_UTIL_PROG subvolume delete $SUBV >> $seqres.full
+	trigger_cleaner
+	check_subvol_usage 256 0
+	check_subvol_usage 257 0
+	_scratch_unmount
+}
+
+nested_accounting()
+{
+	echo "nested" > /dev/ksmg
+	prepare_nested
+	echo "nested" >> $seqres.full
+	echo "delete file" >> $seqres.full
+	rm $SUBV/f
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 $EXT_SZ
+	local subv_usage=$(get_subvol_usage 256)
+	local nested_usage=$(get_subvol_usage 257)
+	check_qgroup_usage 1/100 $(($subv_usage + $nested_usage))
+	rm $NESTED/f
+	check_subvol_usage 256 $TOTAL_FILL
+	check_subvol_usage 257 0
+	subv_usage=$(get_subvol_usage 256)
+	nested_usage=$(get_subvol_usage 257)
+	check_qgroup_usage 1/100 $(($subv_usage + $nested_usage))
+	_scratch_unmount
+}
+
+enable_mature()
+{
+	echo "mature" > /dev/ksmg
+	_scratch_mkfs >> $seqres.full
+	_scratch_mount
+	$BTRFS_UTIL_PROG subvolume create $SUBV >> $seqres.full
+	do_write $SUBV/f $EXT_SZ
+	sync
+	enable_quota "s"
+	set_subvol_limit 256 $LIMIT
+	_scratch_cycle_mount
+	usage=$(get_subvol_usage 256)
+	[ $usage -lt $EXT_SZ ] || _fail "captured usage from before enable $usage"
+	do_write $SUBV/g $EXT_SZ
+	usage=$(get_subvol_usage 256)
+	[ $usage -lt $EXT_SZ ] && "failed to capture usage after enable $usage"
+	check_subvol_usage 256 $EXT_SZ
+	rm $SUBV/f
+	check_subvol_usage 256 $EXT_SZ
+	_scratch_cycle_mount
+	rm $SUBV/g
+	check_subvol_usage 256 0
+}
+
+basic_accounting
+reservation_accounting
+snapshot_accounting
+delete_subvol_file
+delete_snapshot_file
+delete_subvol
+delete_snapshot
+nested_accounting
+enable_mature
+
+echo "Silence is golden"
+
+# success, all done
+status=0
+exit
