@@ -1409,6 +1409,10 @@ int qgroup_verify_all(struct btrfs_fs_info *info)
 	bool skip_err = false;
 	struct rb_node *node;
 
+	// TODO: actually check it..
+	if (btrfs_fs_incompat(info, SIMPLE_QUOTA))
+		return 0;
+
 	if (!info->quota_enabled)
 		return 0;
 
