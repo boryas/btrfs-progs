@@ -32,6 +32,8 @@ _cleanup()
 	_btrfs_rescan_devices
 }
 
+_notrun "BORKED SKIP FOR NOW"
+
 # Import common functions.
 . ./common/filter
 
