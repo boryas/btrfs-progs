@@ -624,3 +624,37 @@ _require_btrfs_send_v2()
 	[ $(cat /sys/fs/btrfs/features/send_stream_version) -gt 1 ] || \
 		_notrun "kernel does not support send stream v2"
 }
+
+_qgroup_mode()
+{
+	local mnt=$1
+
+	uuid=$(findmnt -n -o UUID $mnt)
+	cat /sys/fs/btrfs/${uuid}/qgroups/mode
+}
+
+_qgroup_rescan()
+{
+	local mnt=$1
+
+	[ "$(_qgroup_mode $mnt)" == "squota" ] && return
+	_run_btrfs_util_prog quota rescan -w $mnt
+}
+
+_require_qgroup_rescan()
+{
+	_scratch_mkfs >>$seqres.full 2>&1
+	_scratch_mount
+    $BTRFS_UTIL_PROG quota rescan -w $SCRATCH_MNT || \
+         _notrun "not able to run quota rescan"
+}
+
+_require_scratch_qgroup()
+{
+	_scratch_mkfs >>$seqres.full 2>&1
+	_scratch_mount
+    _run_btrfs_util_prog quota enable $SCRATCH_MNT
+	_qgroup_mode $SCRATCH_MNT | grep -q 'qgroup' || \
+         _notrun "not running normal qgroups"
+	_scratch_unmount
+}

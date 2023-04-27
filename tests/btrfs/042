@@ -19,6 +19,7 @@ _require_btrfs_qgroup_report
 run_check _scratch_mkfs
 _scratch_mount
 
+#LIMIT_SIZE=$((10 * 1024 * 1024 * 1024))
 LIMIT_SIZE=$((10 * 1024 * 1024))
 
 _run_btrfs_util_prog quota enable $SCRATCH_MNT
@@ -45,12 +46,13 @@ total_written=0
 #calculate every subvolume's data.
 for i in `seq 10 -1 1`; do
 	#we may fail to create the file, skip this subvolume
-	test -f $SCRATCH_MNT/subv_$i || continue
+	test -f $SCRATCH_MNT/subv_$i/data || continue
 
 	filesize=`du -b $SCRATCH_MNT/subv_$i/data | $AWK_PROG '{print $1}'`
 	if [ $filesize -gt $LIMIT_SIZE ];then
 		_fail "subv_$i/data size should be less than $LIMIT_SIZE"
 	fi
+	#echo $filesize
 	total_written=$(($total_written+$filesize))
 done
 
@@ -58,6 +60,9 @@ done
 if [ $total_written -gt $LIMIT_SIZE ];then
 	_fail "total written should be less than $LIMIT_SIZE"
 fi
+
+#echo $total_written
+#echo $LIMIT_SIZE
 
 # success, all done
 echo "Silence is golden"
