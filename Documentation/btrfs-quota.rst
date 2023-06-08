@@ -47,8 +47,13 @@ SUBCOMMAND
 disable <path>
         Disable subvolume quota support for a filesystem.
 
-enable <path>
+enable [options] <path>
         Enable subvolume quota support for a filesystem.
+
+        ``Options``
+
+	-s|--simple
+		use simple quotas (squotas) instead of qgroups
 
 rescan [options] <path>
         Trash all qgroup numbers and scan the metadata again with the current config.
