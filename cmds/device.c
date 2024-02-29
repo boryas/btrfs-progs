@@ -487,7 +487,7 @@ static int cmd_device_scan(const struct cmd_struct *cmd, int argc, char **argv)
 	for( i = devstart ; i < argc ; i++ ){
 		char *path;
 
-		if (path_is_block_device(argv[i]) != 1) {
+		if (!forget && path_is_block_device(argv[i]) != 1) {
 			error("not a block device: %s", argv[i]);
 			ret = 1;
 			goto out;
