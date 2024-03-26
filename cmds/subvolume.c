@@ -779,11 +779,11 @@ static int cmd_subvolume_snapshot(const struct cmd_struct *cmd, int argc, char *
 
 	if (readonly)
 		pr_verbose(LOG_DEFAULT,
-			   "Create readonly snapshot of '%s' in '%s/%s'\n",
+			   "Create a readonly snapshot of '%s' in '%s/%s'\n",
 			   subvol, dstdir, newname);
 	else
 		pr_verbose(LOG_DEFAULT,
-			   "Create snapshot of '%s' in '%s/%s'\n",
+			   "Create a snapshot of '%s' in '%s/%s'\n",
 			   subvol, dstdir, newname);
 
 out:
