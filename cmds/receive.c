@@ -1259,6 +1259,8 @@ static int process_encoded_write(const char *path, const void *data, u64 offset,
 		.encryption = encryption,
 	};
 
+	return 0;
+
 	if (bconf.verbose >= 3)
 		fprintf(stderr,
 "encoded_write %s - offset=%llu, len=%llu, unencoded_offset=%llu, unencoded_file_len=%llu, unencoded_len=%llu, compression=%u, encryption=%u\n",
@@ -1285,7 +1287,7 @@ static int process_encoded_write(const char *path, const void *data, u64 offset,
 		if (ret >= 0)
 			return 0;
 		/* Fall back for these errors, fail hard for anything else. */
-		if (errno != ENOSPC && errno != ENOTTY && errno != EINVAL) {
+		if (errno != ENOSPC && errno != ENOTTY && errno != EINVAL && errno != EPERM) {
 			ret = -errno;
 			error("encoded_write: writing to %s failed: %m", path);
 			return ret;
@@ -1498,6 +1500,7 @@ static int do_receive(struct btrfs_receive *rctx, const char *tomnt,
 			goto out;
 		}
 	}
+	printf("open fd for path %s\n", rctx->root_path);
 	rctx->mnt_fd = open(rctx->root_path, O_RDONLY | O_NOATIME);
 	if (rctx->mnt_fd < 0) {
 		ret = -errno;
@@ -1524,6 +1527,7 @@ static int do_receive(struct btrfs_receive *rctx, const char *tomnt,
 		error("cannot resolve our subvol path");
 		goto out;
 	}
+	printf("resolved our subvol path %s\n", root_subvol_path);
 
 	/*
 	 * Ok we're inside of a subvol off of the root subvol, we need to

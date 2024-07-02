@@ -195,10 +195,13 @@ static int btrfs_subvolid_resolve_sub(int fd, char *path, size_t *path_len,
 	struct btrfs_tree_search_args args;
 	struct btrfs_ioctl_search_key *sk;
 	struct btrfs_ioctl_ino_lookup_args ino_lookup_arg;
+	struct btrfs_ioctl_ino_lookup_user_args ino_lookup_user_arg;
 	struct btrfs_ioctl_search_header sh;
 	struct btrfs_root_ref *backref_item;
+	printf("subvolid_resolve_sub %llu\n", subvol_id);
 
 	if (subvol_id == BTRFS_FS_TREE_OBJECTID) {
+		printf("Skip subvol resolve %llu\n", subvol_id);
 		if (*path_len < 1)
 			return -EOVERFLOW;
 		*path = '\0';
@@ -242,26 +245,29 @@ static int btrfs_subvolid_resolve_sub(int fd, char *path, size_t *path_len,
 		(*path_len)--;
 	}
 
+	printf("backref root ref dirid %llu\n", btrfs_stack_root_ref_dirid(backref_item));
 	if (btrfs_stack_root_ref_dirid(backref_item) !=
 	    BTRFS_FIRST_FREE_OBJECTID) {
 		int len;
 
-		memset(&ino_lookup_arg, 0, sizeof(ino_lookup_arg));
-		ino_lookup_arg.treeid = sh.offset;
-		ino_lookup_arg.objectid =
+		memset(&ino_lookup_user_arg, 0, sizeof(ino_lookup_user_arg));
+		printf("INO_LOOKUP_USER %llu %llu\n", subvol_id, btrfs_stack_root_ref_dirid(backref_item));
+		ino_lookup_user_arg.treeid = sh.offset;
+		ino_lookup_user_arg.dirid =
 			btrfs_stack_root_ref_dirid(backref_item);
-		ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &ino_lookup_arg);
+		ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP_USER, &ino_lookup_user_arg);
 		if (ret < 0) {
 			fprintf(stderr,
-				"ioctl(BTRFS_IOC_INO_LOOKUP) ret=%d, error: %m\n",
+				"ioctl(BTRFS_IOC_INO_LOOKUP_USER) ret=%d, error: %m\n",
 				ret);
 			return ret;
 		}
+		printf("INO_LOOKUP_USER %llu %llu done: %s %s\n", sh.offset, btrfs_stack_root_ref_dirid(backref_item), ino_lookup_user_arg.path, ino_lookup_user_arg.name);
 
-		len = strlen(ino_lookup_arg.name);
+		len = strlen(ino_lookup_user_arg.name);
 		if (*path_len < len)
 			return -EOVERFLOW;
-		strcat(path, ino_lookup_arg.name);
+		strcat(path, ino_lookup_user_arg.name);
 		(*path_len) -= len;
 	}
 
@@ -270,6 +276,7 @@ static int btrfs_subvolid_resolve_sub(int fd, char *path, size_t *path_len,
 	strncat(path, (char *)(backref_item + 1),
 		btrfs_stack_root_ref_name_len(backref_item));
 	(*path_len) -= btrfs_stack_root_ref_name_len(backref_item);
+	printf("subvolid_resolve_sub %llu done. path %s\n", subvol_id, path);
 	return 0;
 }
 
