@@ -93,6 +93,31 @@ static struct counts_tree {
 
 static LIST_HEAD(bad_qgroups);
 
+/*
+ * Track stale owner refs: extents with an owner_ref pointing to a root
+ * that has no qgroup.  Used for detection and repair.
+ */
+struct stale_owner_ref {
+	struct list_head list;
+	u64 bytenr;
+	u64 root_id;
+	bool is_data;	/* true if data extent (has removable owner_ref) */
+};
+
+static LIST_HEAD(stale_owner_refs);
+static int nr_stale_owner_refs;
+
+/*
+ * Track subvolumes that exist but have no qgroup.
+ */
+struct missing_qgroup {
+	struct list_head list;
+	u64 subvolid;
+};
+
+static LIST_HEAD(missing_qgroups);
+static int nr_missing_qgroups;
+
 static struct rb_root by_bytenr = RB_ROOT;
 
 /*
@@ -1035,6 +1060,66 @@ out:
 	return ret;
 }
 
+/*
+ * Check that every fstree subvolume has a corresponding qgroup.
+ * Called after load_quota_info() so find_count() works.
+ */
+static int check_subvols_have_qgroups(struct btrfs_fs_info *info)
+{
+	struct btrfs_root *tree_root = info->tree_root;
+	struct btrfs_path path = { 0 };
+	struct btrfs_key key;
+	int ret;
+
+	key.objectid = BTRFS_FIRST_FREE_OBJECTID;
+	key.type = BTRFS_ROOT_ITEM_KEY;
+	key.offset = 0;
+
+	ret = btrfs_search_slot(NULL, tree_root, &key, &path, 0, 0);
+	if (ret < 0)
+		return ret;
+
+	while (1) {
+		struct extent_buffer *leaf = path.nodes[0];
+		int slot = path.slots[0];
+
+		if (slot >= btrfs_header_nritems(leaf)) {
+			ret = btrfs_next_leaf(tree_root, &path);
+			if (ret)
+				break;
+			continue;
+		}
+
+		btrfs_item_key_to_cpu(leaf, &key, slot);
+		if (key.type != BTRFS_ROOT_ITEM_KEY)
+			goto next;
+		if (!is_fstree(key.objectid))
+			goto next;
+
+		if (!find_count(key.objectid)) {
+			struct missing_qgroup *mq;
+
+			error(
+		"subvolume %llu exists but has no qgroup (squota accounting will fail)",
+			      key.objectid);
+			nr_missing_qgroups++;
+
+			mq = calloc(1, sizeof(*mq));
+			if (!mq) {
+				ret = -ENOMEM;
+				break;
+			}
+			mq->subvolid = key.objectid;
+			list_add_tail(&mq->list, &missing_qgroups);
+		}
+next:
+		path.slots[0]++;
+	}
+
+	btrfs_release_path(&path);
+	return ret < 0 ? ret : 0;
+}
+
 static int simple_quota_account_extent(struct btrfs_fs_info *info,
 				       struct extent_buffer *leaf,
 				       struct btrfs_key *key,
@@ -1076,6 +1161,31 @@ static int simple_quota_account_extent(struct btrfs_fs_info *info,
 
 	if (!is_fstree(root))
 		return 0;
+
+	if (!find_count(root)) {
+		struct stale_owner_ref *sref;
+
+		if (nr_stale_owner_refs < 10)
+			error(
+		"%s extent %llu owned by root %llu which has no qgroup",
+			      meta_item ? "metadata" : "data",
+			      bytenr, root);
+		else if (nr_stale_owner_refs == 10)
+			error("... and more extents with missing qgroups");
+		nr_stale_owner_refs++;
+
+		/* Only data extents have removable owner_refs. */
+		if (!meta_item) {
+			sref = calloc(1, sizeof(*sref));
+			if (!sref)
+				return -ENOMEM;
+			sref->bytenr = bytenr;
+			sref->root_id = root;
+			sref->is_data = true;
+			list_add_tail(&sref->list, &stale_owner_refs);
+		}
+		return 0;
+	}
 
 	ulist_init(&roots);
 	ulist_add(&roots, root, 0, 0);
@@ -1438,6 +1548,24 @@ void free_qgroup_counts(void)
 		rb_erase(&c->rb_node, &counts.root);
 		free(c);
 	}
+
+	while (!list_empty(&stale_owner_refs)) {
+		struct stale_owner_ref *sref;
+
+		sref = list_first_entry(&stale_owner_refs,
+					struct stale_owner_ref, list);
+		list_del(&sref->list);
+		free(sref);
+	}
+
+	while (!list_empty(&missing_qgroups)) {
+		struct missing_qgroup *mq;
+
+		mq = list_first_entry(&missing_qgroups,
+				      struct missing_qgroup, list);
+		list_del(&mq->list);
+		free(mq);
+	}
 }
 
 static bool is_bad_qgroup(struct qgroup_count *count)
@@ -1478,6 +1606,16 @@ int qgroup_verify_all(struct btrfs_fs_info *info)
 	if (ret) {
 		error("loading qgroups from disk: %d", ret);
 		goto out;
+	}
+
+	if (counts.simple) {
+		ret = check_subvols_have_qgroups(info);
+		if (ret) {
+			error("while checking subvols for qgroups: %d", ret);
+			goto out;
+		}
+		if (nr_missing_qgroups)
+			found_err = true;
 	}
 
 	if (counts.rescan_running)
@@ -1532,6 +1670,9 @@ check:
 		}
 		node = rb_next(node);
 	}
+
+	if (nr_stale_owner_refs)
+		found_err = true;
 
 out:
 	/*
@@ -1725,10 +1866,117 @@ out:
 	return ret;
 }
 
+/*
+ * Remove a stale owner ref from an extent item.
+ */
+static int repair_owner_ref(struct btrfs_fs_info *info,
+			    struct stale_owner_ref *sref)
+{
+	struct btrfs_root *extent_root;
+	struct btrfs_trans_handle *trans;
+	struct btrfs_path path = { 0 };
+	struct btrfs_key key;
+	struct btrfs_extent_item *ei;
+	struct btrfs_extent_inline_ref *iref;
+	struct extent_buffer *leaf;
+	unsigned long ptr, end;
+	u32 item_size;
+	int type;
+	int size;
+	int ret;
+
+	extent_root = btrfs_extent_root(info, sref->bytenr);
+	if (!extent_root)
+		return -ENOENT;
+
+	trans = btrfs_start_transaction(extent_root, 1);
+	if (IS_ERR(trans))
+		return PTR_ERR(trans);
+
+	key.objectid = sref->bytenr;
+	key.type = BTRFS_EXTENT_ITEM_KEY;
+	key.offset = (u64)-1;
+
+	ret = btrfs_search_slot(trans, extent_root, &key, &path, 0, 1);
+	if (ret <= 0) {
+		if (ret == 0)
+			ret = -EUCLEAN;
+		goto out;
+	}
+
+	ret = btrfs_previous_item(extent_root, &path, sref->bytenr,
+				  BTRFS_EXTENT_ITEM_KEY);
+	if (ret) {
+		/* Try METADATA_ITEM */
+		btrfs_release_path(&path);
+		key.type = BTRFS_METADATA_ITEM_KEY;
+		key.offset = (u64)-1;
+		ret = btrfs_search_slot(trans, extent_root, &key, &path, 0, 1);
+		if (ret <= 0) {
+			if (ret == 0)
+				ret = -EUCLEAN;
+			goto out;
+		}
+		ret = btrfs_previous_item(extent_root, &path, sref->bytenr,
+					  BTRFS_METADATA_ITEM_KEY);
+		if (ret) {
+			ret = ret < 0 ? ret : -ENOENT;
+			goto out;
+		}
+	}
+
+	leaf = path.nodes[0];
+	btrfs_item_key_to_cpu(leaf, &key, path.slots[0]);
+	ei = btrfs_item_ptr(leaf, path.slots[0], struct btrfs_extent_item);
+	item_size = btrfs_item_size(leaf, path.slots[0]);
+
+	/* Walk inline refs to find the owner ref. */
+	ptr = (unsigned long)(ei + 1);
+	if ((btrfs_extent_flags(leaf, ei) & BTRFS_EXTENT_FLAG_TREE_BLOCK) &&
+	    key.type == BTRFS_EXTENT_ITEM_KEY)
+		ptr += sizeof(struct btrfs_tree_block_info);
+	end = (unsigned long)ei + item_size;
+
+	while (ptr < end) {
+		iref = (struct btrfs_extent_inline_ref *)ptr;
+		type = btrfs_extent_inline_ref_type(leaf, iref);
+
+		if (type == BTRFS_EXTENT_OWNER_REF_KEY) {
+			u64 owner_offset = btrfs_extent_inline_ref_offset(leaf, iref);
+
+			if (owner_offset == sref->root_id) {
+				/* Found it. Remove it. */
+				size = btrfs_extent_inline_ref_size(type);
+				if (ptr + size < end)
+					memmove_extent_buffer(leaf, ptr,
+							      ptr + size,
+							      end - ptr - size);
+				item_size -= size;
+				btrfs_truncate_item(&path, item_size, 1);
+				btrfs_mark_buffer_dirty(leaf);
+				printf("removed stale owner ref (root %llu) from extent %llu\n",
+				       sref->root_id, sref->bytenr);
+				ret = 0;
+				goto out;
+			}
+		}
+		ptr += btrfs_extent_inline_ref_size(type);
+	}
+
+	error("could not find owner ref for root %llu in extent %llu",
+	      sref->root_id, sref->bytenr);
+	ret = -ENOENT;
+out:
+	btrfs_commit_transaction(trans, extent_root);
+	btrfs_release_path(&path);
+	return ret;
+}
+
 int repair_qgroups(struct btrfs_fs_info *info, int *repaired, bool silent)
 {
 	int ret = 0;
 	struct qgroup_count *count, *tmpcount;
+	struct stale_owner_ref *sref, *tmpsref;
 
 	*repaired = 0;
 
@@ -1744,6 +1992,19 @@ int repair_qgroups(struct btrfs_fs_info *info, int *repaired, bool silent)
 		(*repaired)++;
 
 		list_del_init(&count->bad_list);
+	}
+
+	/* Remove stale owner refs from extent items. */
+	list_for_each_entry_safe(sref, tmpsref, &stale_owner_refs, list) {
+		ret = repair_owner_ref(info, sref);
+		if (ret) {
+			error("failed to remove stale owner ref at extent %llu: %d",
+			      sref->bytenr, ret);
+			goto out;
+		}
+		(*repaired)++;
+		list_del(&sref->list);
+		free(sref);
 	}
 
 	/*

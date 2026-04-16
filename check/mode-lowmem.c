@@ -3038,6 +3038,7 @@ static int check_extent_inline_ref(struct extent_buffer *eb,
 	case BTRFS_EXTENT_DATA_REF_KEY:
 	case BTRFS_SHARED_BLOCK_REF_KEY:
 	case BTRFS_SHARED_DATA_REF_KEY:
+	case BTRFS_EXTENT_OWNER_REF_KEY:
 		ret = 0;
 		break;
 	default:
@@ -4629,6 +4630,8 @@ next:
 	case BTRFS_SHARED_DATA_REF_KEY:
 		parent = offset;
 		tmp_err |= check_shared_data_backref(offset, key.objectid);
+		break;
+	case BTRFS_EXTENT_OWNER_REF_KEY:
 		break;
 	default:
 		error("extent[%llu %d %llu] has unknown ref type: %d",
