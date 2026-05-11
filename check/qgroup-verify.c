@@ -978,7 +978,7 @@ loop:
 	 * items. The 2nd pass picks up relation items and glues them to their
 	 * respective count structures.
 	 */
-	key.objectid = search_relations ? 0 : BTRFS_QGROUP_RELATION_KEY;
+	key.objectid = 0;
 	key.type = 0;
 	key.offset = 0;
 
