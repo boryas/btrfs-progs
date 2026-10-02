@@ -1322,6 +1322,7 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 		kfree(fs_info->quota_root);
 		fs_info->quota_root = NULL;
 	} else {
+		set_bit(BTRFS_ROOT_TRACK_DIRTY, &fs_info->quota_root->state);
 		fs_info->quota_enabled = 1;
 	}
 
