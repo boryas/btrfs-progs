@@ -57,6 +57,12 @@ OPTIONS
 --remove-simple-quota
 	Remove simple quota accounting related structures.
 
+--backfill-simple-quota
+	Enable simple quota accounting if not enabled, and account all existing
+	extents, not only those written after enabling. Data extents without an
+	owner are charged to the subvolume with the lowest id that references
+	them. Can be run again if interrupted.
+
 -f
         Allow dangerous changes, e.g. clear the seeding flag or change fsid.
         Make sure that you are aware of the dangers.

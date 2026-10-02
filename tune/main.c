@@ -107,6 +107,7 @@ static const char * const tune_usage[] = {
 	OPTLINE("-S <0|1>", "set/unset seeding status of a device"),
 	OPTLINE("--enable-simple-quota", "enable simple quotas on the file system. (mkfs: squota)"),
 	OPTLINE("--remove-simple-quota", "remove simple quotas from the file system."),
+	OPTLINE("--backfill-simple-quota", "enable simple quotas and account all existing extents"),
 	OPTLINE("--convert-to-block-group-tree", "convert filesystem to track block groups in "
 			"the separate block-group-tree instead of extent tree (sets the incompat bit)"),
 	OPTLINE("--convert-from-block-group-tree",
@@ -208,6 +209,7 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 	u64 super_flags = 0;
 	int quota = 0;
 	int remove_simple_quota = 0;
+	int backfill_simple_quota = 0;
 	int fd = -1;
 	int oflags = O_RDWR;
 
@@ -223,6 +225,7 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 		       GETOPT_VAL_ENABLE_SIMPLE_QUOTA,
 		       GETOPT_VAL_REMOVE_SIMPLE_QUOTA,
 		       GETOPT_VAL_ENABLE_REMAP_TREE,
+		       GETOPT_VAL_BACKFILL_SIMPLE_QUOTA,
 		       GETOPT_VAL_VERSION,
 		};
 		static const struct option long_options[] = {
@@ -238,6 +241,8 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 				GETOPT_VAL_ENABLE_SIMPLE_QUOTA },
 			{ "remove-simple-quota", no_argument, NULL,
 				GETOPT_VAL_REMOVE_SIMPLE_QUOTA},
+			{ "backfill-simple-quota", no_argument, NULL,
+				GETOPT_VAL_BACKFILL_SIMPLE_QUOTA},
 #if EXPERIMENTAL
 			{ "csum", required_argument, NULL, GETOPT_VAL_CSUM },
 			{ "convert-to-remap-tree", no_argument, NULL,
@@ -309,6 +314,10 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 			break;
 		case GETOPT_VAL_REMOVE_SIMPLE_QUOTA:
 			remove_simple_quota = 1;
+			btrfstune_cmd_groups[QGROUP] = true;
+			break;
+		case GETOPT_VAL_BACKFILL_SIMPLE_QUOTA:
+			backfill_simple_quota = 1;
 			btrfstune_cmd_groups[QGROUP] = true;
 			break;
 #if EXPERIMENTAL
@@ -611,6 +620,12 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 
 	if (remove_simple_quota) {
 		ret = remove_squota(root->fs_info);
+		if (ret)
+			goto out;
+	}
+
+	if (backfill_simple_quota) {
+		ret = backfill_squota(root->fs_info);
 		if (ret)
 			goto out;
 	}
